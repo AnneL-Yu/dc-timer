@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DC時間管理師</title>
+    <style>
+        :root { --primary: #00f2ff; --warn: #ff0000; --bg: #050505; --card: #111; --disabled: #222; }
+        body { background: var(--bg); color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        
+        .container { width: 90%; max-width: 450px; text-align: center; }
+        
+        /* 巨大計時器樣式 */
+        .timer-display { 
+            font-size: clamp(80px, 25vw, 140px); font-weight: 900; margin: 40px 0; 
+            color: var(--primary); text-shadow: 0 0 20px var(--primary);
+            font-family: 'Courier New', monospace; transition: opacity 0.1s;
+        }
+        .over-text { color: var(--warn) !important; text-shadow: 0 0 30px var(--warn) !important; }
+
+        /* 登入畫面 */
+        #login-screen { background: var(--card); padding: 40px 20px; border-radius: 24px; border: 1px solid var(--primary); }
+        
+        /* 區塊顯示切換 */
+        #player-ui, #admin-ui { display: none; width: 100%; }
+
+        /* 成績清單 */
+        .result-list { background: var(--card); border-radius: 16px; padding: 15px; margin-top: 20px; text-align: left; border: 1px solid #333; }
+        .result-row { display: flex; justify-content: space-between; padding: 12px; border-bottom: 1px solid #222; font-size: 18px; }
+        .result-row:last-child { border: none; }
+        .bust-name { color: var(--warn); }
+
+        /* 按鈕與輸入框 */
+        button { padding: 20px; font-size: 18px; font-weight: bold; border: none; border-radius: 12px; cursor: pointer; width: 100%; transition: all 0.2s; margin: 10px 0; }
+        #stop-btn { background: var(--primary); color: black; }
+        
+        /* 按鈕變灰色且不能點的樣式 */
+        #stop-btn:disabled { 
+            background: var(--disabled) !important; 
+            color: #444 !important; 
+            cursor: not-allowed; 
+            box-shadow: none !important;
+            transform: scale(0.98);
+        }
+
+        #start-btn { background: #00ff88; color: black; font-size: 22px; }
+        #reset-btn { background: transparent; color: #666; border: 1px solid #333; }
+        input { width: 85%; padding: 15px; border-radius: 8px; border: 1px solid #333; background: #000; color: white; text-align: center; margin-bottom: 20px; font-size: 18px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div id="login-screen">
+        <h1 style="color:var(--primary); letter-spacing: 2px; margin-bottom: 30px;">DC時間管理師</h1>
+        <input type="text" id="username" placeholder="請輸入名字" maxlength="10">
+        <button id="join-btn" style="background:var(--primary)">進入房間</button>
+    </div>
+
+    <div id="player-ui">
+        <div style="color: #666;">等待發號施令...</div>
+        <div id="player-timer" class="timer-display">0.00</div>
+        <button id="stop-btn" disabled>STOP</button>
+        <div id="wait-msg" style="display:none; color:var(--primary); margin-top:20px;">成績已鎖定，請等待開獎</div>
+    </div>
+
+    <div id="admin-ui">
+        <div style="color: yellow; letter-spacing: 1px;">主控台計時同步中</div>
+        <div id="admin-timer" class="timer-display">0.00</div>
+        <button id="start-btn">開始遊戲</button>
+        <button id="reset-btn">清空所有紀錄</button>
+        <div class="result-list">
+            <div style="color:#555; font-size:12px; margin-bottom:10px;">即時成績清單</div>
+            <div id="admin-results-list"></div>
+        </div>
+    </div>
+</div>
+
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getDatabase, ref, onValue, set, push, remove } 
+    from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+    const firebaseConfig = {
+        apiKey: "AIzaSyCOEILTMCYOWf8QUdVQP4DPwih-4_Ymo2w",
+        authDomain: "dc26-effda.firebaseapp.com",
+        databaseURL: "https://dc26-effda-default-rtdb.firebaseio.com",
+        projectId: "dc26-effda",
+        storageBucket: "dc26-effda.firebasestorage.app",
+        messagingSenderId: "933151619542",
+        appId: "1:933151619542:web:5744cc69677634d3628c77"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+    const stateRef = ref(db, 'game_state');
+    const resultsRef = ref(db, 'results');
+
+    // 通用音效函式
+    const playSound = (freq, duration, type = 'sine') => {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.frequency.value = freq;
+        osc.start();
+        gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + duration);
+        osc.stop(audioCtx.currentTime + duration);
+    };
+
+    const isAdmin = new URLSearchParams(window.location.search).has('admin');
+    const loginScreen = document.getElementById('login-screen');
+    const playerUI = document.getElementById('player-ui');
+    const adminUI = document.getElementById('admin-ui');
+    const stopBtn = document.getElementById('stop-btn');
+    
+    let currentName = "";
+    let gameInterval;
+    let lastSecond = -1;
+
+    if (isAdmin) {
+        loginScreen.style.display = 'none';
+        adminUI.style.display = 'block';
+    }
+
+    document.getElementById('join-btn').onclick = () => {
+        currentName = document.getElementById('username').value.trim();
+        if(!currentName) return alert("請輸入名字");
+        loginScreen.style.display = 'none';
+        playerUI.style.display = 'block';
+    };
+
+    onValue(stateRef, (snapshot) => {
+        const state = snapshot.val();
+        if(state?.status === 'playing') {
+            startSyncTimer(state.startTime);
+        } else {
+            resetGlobalUI();
+        }
+    });
+
+    function startSyncTimer(startTime) {
+        const timerID = isAdmin ? 'admin-timer' : 'player-timer';
+        const display = document.getElementById(timerID);
+        
+        if (!isAdmin) {
+            stopBtn.disabled = false;
+            stopBtn.innerText = "STOP";
+        }
+        document.getElementById('wait-msg').style.display = 'none';
+        display.classList.remove('over-text');
+        
+        clearInterval(gameInterval);
+        lastSecond = -1;
+        
+        gameInterval = setInterval(() => {
+            const elapsed = (Date.now() - startTime) / 1000;
+            const currentSec = Math.floor(elapsed);
+
+            // 每秒滴答
+            if (currentSec !== lastSecond && currentSec <= 10) {
+                playSound(currentSec < 5 ? 800 : 400, 0.05);
+                lastSecond = currentSec;
+            }
+            
+            if (elapsed <= 5) {
+                display.innerText = elapsed.toFixed(2);
+                display.style.opacity = "1";
+            } else if (elapsed <= 10) {
+                display.innerText = elapsed.toFixed(2);
+                display.style.opacity = (1 - (elapsed - 5) / 5).toString();
+            } else if (elapsed < 60) {
+                display.innerText = "---";
+                display.style.opacity = "1";
+            } else {
+                // OVER 邏輯
+                display.innerText = "OVER";
+                display.classList.add('over-text');
+                
+                // 播放爆掉音效 (低頻警告)
+                playSound(150, 0.8, 'sawtooth'); 
+                
+                clearInterval(gameInterval);
+                if (!isAdmin) {
+                    stopBtn.disabled = true; // 這裡會觸發 CSS 變灰
+                    stopBtn.innerText = "BUSTED";
+                    uploadResult(elapsed, true);
+                }
+            }
+        }, 50);
+    }
+
+    function resetGlobalUI() {
+        clearInterval(gameInterval);
+        const displays = document.querySelectorAll('.timer-display');
+        displays.forEach(d => {
+            d.innerText = "0.00";
+            d.style.opacity = "1";
+            d.classList.remove('over-text');
+        });
+        if (!isAdmin) {
+            stopBtn.disabled = true;
+            stopBtn.innerText = "STOP";
+        }
+        lastSecond = -1;
+    }
+
+    stopBtn.onclick = () => {
+        const stopTime = Date.now();
+        clearInterval(gameInterval);
+        stopBtn.disabled = true;
+        stopBtn.innerText = "LOCKED";
+        
+        // 播放「叮」確認音
+        playSound(1000, 0.2, 'sine');
+
+        document.getElementById('player-timer').innerText = "LOCKED";
+        document.getElementById('wait-msg').style.display = 'block';
+        onValue(stateRef, (snap) => {
+            uploadResult((stopTime - snap.val().startTime) / 1000, false);
+        }, { onlyOnce: true });
+    };
+
+    function uploadResult(time, bust) {
+        push(resultsRef, { name: currentName, time: time, bust: bust, diff: Math.abs(60 - time) });
+    }
+
+    onValue(resultsRef, (snapshot) => {
+        if (!isAdmin) return;
+        const list = document.getElementById('admin-results-list');
+        list.innerHTML = "";
+        const results = [];
+        snapshot.forEach(child => results.push(child.val()));
+        results.sort((a, b) => a.diff - b.diff);
+
+        results.forEach(r => {
+            list.innerHTML += `
+                <div class="result-row">
+                    <span class="${r.bust ? 'bust-name' : ''}">${r.name}</span>
+                    <span style="color:${r.bust ? '#ff0000' : '#00ff88'}">${r.time.toFixed(3)}s</span>
+                </div>`;
+        });
+    });
+
+    document.getElementById('start-btn').onclick = () => {
+        remove(resultsRef);
+        set(stateRef, { status: 'playing', startTime: Date.now() });
+    };
+
+    document.getElementById('reset-btn').onclick = () => {
+        set(stateRef, { status: 'waiting' });
+    };
+</script>
+</body>
+</html>
