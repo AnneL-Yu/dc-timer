@@ -7,10 +7,8 @@
     <style>
         :root { --primary: #00f2ff; --warn: #ff0000; --bg: #050505; --card: #111; --disabled: #222; }
         body { background: var(--bg); color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        
         .container { width: 90%; max-width: 450px; text-align: center; }
         
-        /* 巨大計時器樣式 */
         .timer-display { 
             font-size: clamp(80px, 25vw, 140px); font-weight: 900; margin: 40px 0; 
             color: var(--primary); text-shadow: 0 0 20px var(--primary);
@@ -18,30 +16,17 @@
         }
         .over-text { color: var(--warn) !important; text-shadow: 0 0 30px var(--warn) !important; }
 
-        /* 登入畫面 */
         #login-screen { background: var(--card); padding: 40px 20px; border-radius: 24px; border: 1px solid var(--primary); }
-        
-        /* 區塊顯示切換 */
         #player-ui, #admin-ui { display: none; width: 100%; }
 
-        /* 成績清單 */
         .result-list { background: var(--card); border-radius: 16px; padding: 15px; margin-top: 20px; text-align: left; border: 1px solid #333; }
         .result-row { display: flex; justify-content: space-between; padding: 12px; border-bottom: 1px solid #222; font-size: 18px; }
         .result-row:last-child { border: none; }
-        .bust-name { color: var(--warn); }
+        .bust-name { color: var(--warn); font-weight: bold; }
 
-        /* 按鈕與輸入框 */
         button { padding: 20px; font-size: 18px; font-weight: bold; border: none; border-radius: 12px; cursor: pointer; width: 100%; transition: all 0.2s; margin: 10px 0; }
         #stop-btn { background: var(--primary); color: black; }
-        
-        /* 按鈕變灰色且不能點的樣式 */
-        #stop-btn:disabled { 
-            background: var(--disabled) !important; 
-            color: #444 !important; 
-            cursor: not-allowed; 
-            box-shadow: none !important;
-            transform: scale(0.98);
-        }
+        #stop-btn:disabled { background: var(--disabled) !important; color: #444 !important; cursor: not-allowed; transform: scale(0.98); }
 
         #start-btn { background: #00ff88; color: black; font-size: 22px; }
         #reset-btn { background: transparent; color: #666; border: 1px solid #333; }
@@ -78,8 +63,7 @@
 
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-    import { getDatabase, ref, onValue, set, push, remove } 
-    from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+    import { getDatabase, ref, onValue, set, push, remove } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyCOEILTMCYOWf8QUdVQP4DPwih-4_Ymo2w",
@@ -96,7 +80,6 @@
     const stateRef = ref(db, 'game_state');
     const resultsRef = ref(db, 'results');
 
-    // 通用音效函式
     const playSound = (freq, duration, type = 'sine') => {
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const osc = audioCtx.createOscillator();
@@ -118,6 +101,7 @@
     let currentName = "";
     let gameInterval;
     let lastSecond = -1;
+    let localStartTime = 0;
 
     if (isAdmin) {
         loginScreen.style.display = 'none';
@@ -134,7 +118,8 @@
     onValue(stateRef, (snapshot) => {
         const state = snapshot.val();
         if(state?.status === 'playing') {
-            startSyncTimer(state.startTime);
+            localStartTime = state.startTime;
+            startSyncTimer(localStartTime);
         } else {
             resetGlobalUI();
         }
@@ -158,7 +143,6 @@
             const elapsed = (Date.now() - startTime) / 1000;
             const currentSec = Math.floor(elapsed);
 
-            // 每秒滴答
             if (currentSec !== lastSecond && currentSec <= 10) {
                 playSound(currentSec < 5 ? 800 : 400, 0.05);
                 lastSecond = currentSec;
@@ -174,16 +158,12 @@
                 display.innerText = "---";
                 display.style.opacity = "1";
             } else {
-                // OVER 邏輯
                 display.innerText = "OVER";
                 display.classList.add('over-text');
-                
-                // 播放爆掉音效 (低頻警告)
                 playSound(150, 0.8, 'sawtooth'); 
-                
                 clearInterval(gameInterval);
-                if (!isAdmin) {
-                    stopBtn.disabled = true; // 這裡會觸發 CSS 變灰
+                if (!isAdmin && stopBtn.innerText === "STOP") {
+                    stopBtn.disabled = true;
                     stopBtn.innerText = "BUSTED";
                     uploadResult(elapsed, true);
                 }
@@ -208,22 +188,27 @@
 
     stopBtn.onclick = () => {
         const stopTime = Date.now();
+        const finalElapsed = (stopTime - localStartTime) / 1000;
+        
         clearInterval(gameInterval);
         stopBtn.disabled = true;
         stopBtn.innerText = "LOCKED";
-        
-        // 播放「叮」確認音
         playSound(1000, 0.2, 'sine');
 
         document.getElementById('player-timer').innerText = "LOCKED";
         document.getElementById('wait-msg').style.display = 'block';
-        onValue(stateRef, (snap) => {
-            uploadResult((stopTime - snap.val().startTime) / 1000, false);
-        }, { onlyOnce: true });
+        
+        uploadResult(finalElapsed, false);
     };
 
     function uploadResult(time, bust) {
-        push(resultsRef, { name: currentName, time: time, bust: bust, diff: Math.abs(60 - time) });
+        push(resultsRef, { 
+            name: currentName, 
+            time: time, 
+            bust: bust, 
+            diff: Math.abs(60 - time),
+            ts: Date.now() 
+        });
     }
 
     onValue(resultsRef, (snapshot) => {
@@ -231,15 +216,19 @@
         const list = document.getElementById('admin-results-list');
         list.innerHTML = "";
         const results = [];
-        snapshot.forEach(child => results.push(child.val()));
+        snapshot.forEach(child => {
+            results.push(child.val());
+        });
         results.sort((a, b) => a.diff - b.diff);
 
         results.forEach(r => {
-            list.innerHTML += `
-                <div class="result-row">
-                    <span class="${r.bust ? 'bust-name' : ''}">${r.name}</span>
-                    <span style="color:${r.bust ? '#ff0000' : '#00ff88'}">${r.time.toFixed(3)}s</span>
-                </div>`;
+            const row = document.createElement('div');
+            row.className = 'result-row';
+            row.innerHTML = `
+                <span class="${r.bust ? 'bust-name' : ''}">${r.name}</span>
+                <span style="color:${r.bust ? '#ff0000' : '#00ff88'}">${r.time.toFixed(3)}s</span>
+            `;
+            list.appendChild(row);
         });
     });
 
