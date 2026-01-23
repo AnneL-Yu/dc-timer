@@ -43,7 +43,7 @@
     </div>
 
     <div id="player-ui">
-        <div style="color: #666;">等待發號施令...</div>
+        <div id="status-text" style="color: #666;">等待發號施令...</div>
         <div id="player-timer" class="timer-display">0.00</div>
         <button id="stop-btn" disabled>STOP</button>
         <div id="wait-msg" style="display:none; color:var(--primary); margin-top:20px;">成績已鎖定，請等待開獎</div>
@@ -63,7 +63,7 @@
 
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-    import { getDatabase, ref, onValue, set, push, remove } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+    import { getDatabase, ref, onValue, set, push, remove, get } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
     const firebaseConfig = {
         apiKey: "AIzaSyCOEILTMCYOWf8QUdVQP4DPwih-4_Ymo2w",
@@ -80,6 +80,17 @@
     const stateRef = ref(db, 'game_state');
     const resultsRef = ref(db, 'results');
 
+    const isAdmin = new URLSearchParams(window.location.search).has('admin');
+    const loginScreen = document.getElementById('login-screen');
+    const playerUI = document.getElementById('player-ui');
+    const adminUI = document.getElementById('admin-ui');
+    const stopBtn = document.getElementById('stop-btn');
+    
+    let currentName = localStorage.getItem('dc_player_name') || "";
+    let gameInterval;
+    let localStartTime = 0;
+    let hasSubmitted = false;
+
     const playSound = (freq, duration, type = 'sine') => {
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         const osc = audioCtx.createOscillator();
@@ -92,25 +103,20 @@
         osc.stop(audioCtx.currentTime + duration);
     };
 
-    const isAdmin = new URLSearchParams(window.location.search).has('admin');
-    const loginScreen = document.getElementById('login-screen');
-    const playerUI = document.getElementById('player-ui');
-    const adminUI = document.getElementById('admin-ui');
-    const stopBtn = document.getElementById('stop-btn');
-    
-    let currentName = "";
-    let gameInterval;
-    let lastSecond = -1;
-    let localStartTime = 0;
-
+    // 初始化介面
     if (isAdmin) {
         loginScreen.style.display = 'none';
         adminUI.style.display = 'block';
+    } else if (currentName) {
+        loginScreen.style.display = 'none';
+        playerUI.style.display = 'block';
     }
 
     document.getElementById('join-btn').onclick = () => {
-        currentName = document.getElementById('username').value.trim();
-        if(!currentName) return alert("請輸入名字");
+        const name = document.getElementById('username').value.trim();
+        if(!name) return alert("請輸入名字");
+        currentName = name;
+        localStorage.setItem('dc_player_name', name);
         loginScreen.style.display = 'none';
         playerUI.style.display = 'block';
     };
@@ -119,11 +125,30 @@
         const state = snapshot.val();
         if(state?.status === 'playing') {
             localStartTime = state.startTime;
-            startSyncTimer(localStartTime);
+            checkIfAlreadySubmitted().then(submitted => {
+                hasSubmitted = submitted;
+                if (!hasSubmitted) {
+                    startSyncTimer(localStartTime);
+                } else {
+                    lockPlayerUI();
+                }
+            });
         } else {
             resetGlobalUI();
         }
     });
+
+    async function checkIfAlreadySubmitted() {
+        if (isAdmin) return false;
+        const snap = await get(resultsRef);
+        let found = false;
+        if (snap.exists()) {
+            snap.forEach(child => {
+                if (child.val().name === currentName) found = true;
+            });
+        }
+        return found;
+    }
 
     function startSyncTimer(startTime) {
         const timerID = isAdmin ? 'admin-timer' : 'player-timer';
@@ -132,21 +157,14 @@
         if (!isAdmin) {
             stopBtn.disabled = false;
             stopBtn.innerText = "STOP";
+            document.getElementById('status-text').innerText = "遊戲進行中...";
         }
         document.getElementById('wait-msg').style.display = 'none';
         display.classList.remove('over-text');
         
         clearInterval(gameInterval);
-        lastSecond = -1;
-        
         gameInterval = setInterval(() => {
             const elapsed = (Date.now() - startTime) / 1000;
-            const currentSec = Math.floor(elapsed);
-
-            if (currentSec !== lastSecond && currentSec <= 10) {
-                playSound(currentSec < 5 ? 800 : 400, 0.05);
-                lastSecond = currentSec;
-            }
             
             if (elapsed <= 5) {
                 display.innerText = elapsed.toFixed(2);
@@ -154,25 +172,35 @@
             } else if (elapsed <= 10) {
                 display.innerText = elapsed.toFixed(2);
                 display.style.opacity = (1 - (elapsed - 5) / 5).toString();
-            } else if (elapsed < 60) {
+            } else if (elapsed < 65) {
                 display.innerText = "---";
                 display.style.opacity = "1";
             } else {
                 display.innerText = "OVER";
                 display.classList.add('over-text');
-                playSound(150, 0.8, 'sawtooth'); 
-                clearInterval(gameInterval);
-                if (!isAdmin && stopBtn.innerText === "STOP") {
+                if (!isAdmin && !hasSubmitted) {
+                    playSound(150, 0.8, 'sawtooth');
                     stopBtn.disabled = true;
                     stopBtn.innerText = "BUSTED";
                     uploadResult(elapsed, true);
+                    hasSubmitted = true;
                 }
+                clearInterval(gameInterval);
             }
         }, 50);
     }
 
+    function lockPlayerUI() {
+        clearInterval(gameInterval);
+        document.getElementById('player-timer').innerText = "LOCKED";
+        stopBtn.disabled = true;
+        stopBtn.innerText = "LOCKED";
+        document.getElementById('wait-msg').style.display = 'block';
+    }
+
     function resetGlobalUI() {
         clearInterval(gameInterval);
+        hasSubmitted = false;
         const displays = document.querySelectorAll('.timer-display');
         displays.forEach(d => {
             d.innerText = "0.00";
@@ -182,22 +210,20 @@
         if (!isAdmin) {
             stopBtn.disabled = true;
             stopBtn.innerText = "STOP";
+            document.getElementById('wait-msg').style.display = 'none';
+            document.getElementById('status-text').innerText = "等待發號施令...";
+        } else {
+            document.getElementById('admin-results-list').innerHTML = "";
         }
-        lastSecond = -1;
     }
 
     stopBtn.onclick = () => {
+        if (hasSubmitted) return;
         const stopTime = Date.now();
         const finalElapsed = (stopTime - localStartTime) / 1000;
-        
-        clearInterval(gameInterval);
-        stopBtn.disabled = true;
-        stopBtn.innerText = "LOCKED";
+        hasSubmitted = true;
+        lockPlayerUI();
         playSound(1000, 0.2, 'sine');
-
-        document.getElementById('player-timer').innerText = "LOCKED";
-        document.getElementById('wait-msg').style.display = 'block';
-        
         uploadResult(finalElapsed, false);
     };
 
@@ -216,18 +242,12 @@
         const list = document.getElementById('admin-results-list');
         list.innerHTML = "";
         const results = [];
-        snapshot.forEach(child => {
-            results.push(child.val());
-        });
+        snapshot.forEach(child => { results.push(child.val()); });
         results.sort((a, b) => a.diff - b.diff);
-
         results.forEach(r => {
             const row = document.createElement('div');
             row.className = 'result-row';
-            row.innerHTML = `
-                <span class="${r.bust ? 'bust-name' : ''}">${r.name}</span>
-                <span style="color:${r.bust ? '#ff0000' : '#00ff88'}">${r.time.toFixed(3)}s</span>
-            `;
+            row.innerHTML = `<span class="${r.bust ? 'bust-name' : ''}">${r.name}</span><span style="color:${r.bust ? '#ff0000' : '#00ff88'}">${r.time.toFixed(3)}s</span>`;
             list.appendChild(row);
         });
     });
@@ -238,6 +258,7 @@
     };
 
     document.getElementById('reset-btn').onclick = () => {
+        remove(resultsRef);
         set(stateRef, { status: 'waiting' });
     };
 </script>
